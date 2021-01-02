@@ -13,6 +13,7 @@
 ########################################
 
 import sys
+import signal
 from http_parser.parser import HttpParser
 import argparse
 import requests 
@@ -37,8 +38,6 @@ def eprint(*args, **kwargs):
 def verbose(*args, **kwargs):
     if commandlineargs.verbose==True:
         print(*args, **kwargs)
-
-######### Initialization Complete - Now lets try and connect to the bridge ##########
 
 def findhue():  #Auto-find bridges on network & get list
     r = requests.get("https://discovery.meethue.com/")
@@ -84,15 +83,6 @@ def findhue():  #Auto-find bridges on network & get list
         pass
     return None
 
-#verbose("Finding bridge...")
-(hueip,port),headers = findhue() or ((None,None),None)
-if hueip is None:
-    sys.exit("Hue bridge not found. Mission failed, better luck next time")
-verbose("I found the Bridge on", hueip)
-
-
-verbose("Checking if Harmonize is registered on the bridge... (Looking for client.json)") #Check if the username and client key have already been saved
-
 def register():
     print("Device not registered on bridge")
     payload = {"devicetype":"harmonizehue","generateclientkey":True}
@@ -119,79 +109,6 @@ def register():
         print("You didn't push the button...  Exiting...")
         exit()
 
-if Path("./client.json").is_file():
-    f = open("client.json", "r")
-    jsonstr = f.read()
-    clientdata = json.loads(jsonstr)
-    f.close()
-    verbose("Client Data Found)")
-    global baseurl
-    baseurl = "http://{}/api".format(hueip)
-    setupurl = baseurl + "/" + clientdata['username']
-    r = requests.get(url = setupurl)
-    setupresponse = dict()
-    setupresponse = json.loads(r.text)
-    if  setupresponse.get('error'):
-        verbose("Client data no longer valid")
-        register()
-    else:
-        verbose("Client data valid", clientdata)
-else:
-    register()
-
-verbose("Requesting bridge information...") #Make sure bridge supports streaming API
-r = requests.get(url = baseurl+"/config")
-jsondata = r.json()
-if jsondata["apiversion"]<"1.22":
-    sys.exit("Bridge is way too old! Upgrade it to 1.22+ in the Hue app.")
-verbose("Api version is good to go. You've got version {}...".format(jsondata["apiversion"]))
-
-######### We're connected! - Now lets find entertainment areas in the list of groups ##########
-r = requests.get(url = baseurl+"/{}/groups".format(clientdata['username']))
-jsondata = r.json()
-groups = dict()
-groupid = commandlineargs.groupid
-
-if groupid is not None:
-    verbose("Checking for entertainment group {}".format(groupid))
-else:
-    verbose("Checking for entertainment groups (not none)")
-
-for k in jsondata:  #These 3 sections isolate Entertainment areas from normal groups (like rooms)
-    if jsondata[k]["type"]=="Entertainment":
-        if groupid is None or k==groupid:
-            groups[k] = jsondata[k]
-
-if len(groups)==0: #No groups or null = exit
-    if groupid is not None:
-        sys.exit("Entertainment group not found, set one up in the Hue App according to the instructions on github.")
-    else:
-        sys.exit("Entertainment group not found, set one up in the Hue App according to the instructions on github.")
-
-if len(groups)>1:
-    eprint("Multiple entertainment groups found (", groups,") specify which with --groupid")
-    for g in groups:
-        eprint("{} = {}".format(g,groups[g]["name"]))
-    groupid = input()
-    print("You selected groupid ", groupid)
-    #sys.exit()
-
-if groupid is None:
-    groupid=next(iter(groups))
-verbose("Using groupid={}".format(groupid))
-
-#### Lets get the lights & their locations in our selected group and enable streaming ######
-for l in jsondata:
-    r = requests.get(url = baseurl+"/{}/groups/{}".format(clientdata['username'],groupid))
-    jsondata = r.json()
-    light_locations = dict()
-    light_locations = jsondata['locations']
-verbose("These are the lights and locations found: \n", light_locations)
-
-##### Setting up streaming service and calling the DTLS handshake command ######
-verbose("Enabling streaming on your Entertainment area") #Allows us to send UPD to port 2100
-r = requests.put(url = baseurl+"/{}/groups/{}".format(clientdata['username'],groupid),json={"stream":{"active":True}})
-jsondata = r.json()
 ######This is used to execute the command near the bottom of this document to create the DTLS handshake with the bridge on port 2100
 def execute(cmd):
     popen = subprocess.Popen(cmd, stdout=subprocess.PIPE, universal_newlines=True)
@@ -202,24 +119,13 @@ def execute(cmd):
     return_code = popen.wait()
     if return_code:
         raise subprocess.CalledProcessError(return_code, cmd)
-        
-######### Prepare the messages' vessel for the RGB values we will insert
-bufferlock = threading.Lock()
-stopped = False
-def stdin_to_buffer():
-    for line in fileinput.input():
-        print(line)
-        if stopped:
-            break
-######################################################
-################# Setup Complete #####################
-######################################################
 
 ######################################################
 ### Scaling light locations and averaging colors #####
 ######################################################
 
 def averageimage():
+    global light_locations
 ########## Scales up locations to identify the nearest pixel based on lights' locations #######
     time.sleep(1.2) #wait for video size to be defined
     for x, coords in light_locations.items():
@@ -234,7 +140,7 @@ def averageimage():
 #### This section assigns light locations to variable light1,2,3...etc. in JSON order
     avgsize = w/2 + h/2
     verbose('avgsize is', avgsize)
-    breadth = .15 #approx percent of the screen outside the location to capture
+    breadth = .75 #approx percent of the screen outside the location to capture
     dist = int(breadth*avgsize) #Proportion of the pixels we want to average around in relation to the video size
     verbose('Distance from relative location is: ', dist)
 
@@ -274,8 +180,9 @@ def averageimage():
 
 ######### Now that weve defined our RGB values as bytes, we define how we pull values from the video analyzer output
 def cv2input_to_buffer(): ######### Section opens the device, sets buffer, pulls W/H
-    global w,h,rgbframe
+    global w,h,rgbframe,stopped
     cap = cv2.VideoCapture(0) #variable cap is our raw video input
+    cap.set(cv2.CAP_PROP_FPS, 60)
     if cap.isOpened(): # Try to get the first frame
         verbose('Capture Device Opened')
     else: #Makes sure we can access the device
@@ -301,6 +208,7 @@ def cv2input_to_buffer(): ######### Section opens the device, sets buffer, pulls
 
 ######### This is where we define our message format and insert our light#s, RGB values, and X,Y,Brightness ##########
 def buffer_to_light(proc): #Potentially thread this into 2 processes?
+    global stopped,bufferlock
     time.sleep(1.5) #Hold on so DTLS connection can be made & message format can get defined
     while not stopped:
         bufferlock.acquire()
@@ -316,41 +224,138 @@ def buffer_to_light(proc): #Potentially thread this into 2 processes?
         proc.stdin.flush()
         #verbose('Wrote message and flushed. Briefly waiting') #This will verbose after every send, spamming the console.
 
-######################################################
-############### Initialization Area ##################
-######################################################
+def stdin_to_buffer():
+        for line in fileinput.input():
+            print(line)
+            if stopped:
+                break
 
-######### Section executes video input and establishes the connection stream to bridge ##########
-try:
-    try:
-        threads = list()
-        verbose("Starting cv2input...")
-        t = threading.Thread(target=cv2input_to_buffer)
-        t.start()
-        threads.append(t)
-        time.sleep(.75)
-        verbose("Starting image averager...")
-        t = threading.Thread(target=averageimage)
-        t.start()
-        threads.append(t)
-        time.sleep(.25) #Initialize and find bridge IP before creating connection
-        verbose("Opening SSL stream to lights...")
-        cmd = ["openssl","s_client","-dtls1_2","-cipher","PSK-AES128-GCM-SHA256","-psk_identity",clientdata['username'],"-psk",clientdata['clientkey'], "-connect", hueip+":2100"]
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-        t = threading.Thread(target=buffer_to_light, args=(proc,))
-        t.start()
-        threads.append(t)
+def stop(sig, frame):
+    global stopped
+    stopped = True
 
-        input("Press return to stop") # Allow us to exit easily
-        stopped=True
-        for t in threads:
-            t.join()
-    except Exception as e:
-        print(e)
-        stopped=True
+if __name__ == '__main__':
+    ######### Initialization Complete - Now lets try and connect to the bridge ##########
+    #verbose("Finding bridge...")
+    (hueip,port),headers = findhue() or ((None,None),None)
+    if hueip is None:
+        sys.exit("Hue bridge not found. Mission failed, better luck next time")
+    verbose("I found the Bridge on", hueip)
+    verbose("Checking if Harmonize is registered on the bridge... (Looking for client.json)") #Check if the username and client key have already been saved
 
-finally: #Turn off streaming to allow normal function immedietly
-    verbose("Disabling streaming on Entertainment area")
-    r = requests.put(url = baseurl+"/{}/groups/{}".format(clientdata['username'],groupid),json={"stream":{"active":False}}) 
+    if Path("./client.json").is_file():
+        f = open("client.json", "r")
+        jsonstr = f.read()
+        clientdata = json.loads(jsonstr)
+        f.close()
+        verbose("Client Data Found)")
+        baseurl = "http://{}/api".format(hueip)
+        setupurl = baseurl + "/" + clientdata['username']
+        r = requests.get(url = setupurl)
+        setupresponse = dict()
+        setupresponse = json.loads(r.text)
+        if  setupresponse.get('error'):
+            verbose("Client data no longer valid")
+            register()
+        else:
+            verbose("Client data valid", clientdata)
+    else:
+        register()
+
+    verbose("Requesting bridge information...") #Make sure bridge supports streaming API
+    r = requests.get(url = baseurl+"/config")
     jsondata = r.json()
-    verbose(jsondata)
+    if jsondata["apiversion"]<"1.22":
+        sys.exit("Bridge is way too old! Upgrade it to 1.22+ in the Hue app.")
+    verbose("Api version is good to go. You've got version {}...".format(jsondata["apiversion"]))
+
+    ######### We're connected! - Now lets find entertainment areas in the list of groups ##########
+    r = requests.get(url = baseurl+"/{}/groups".format(clientdata['username']))
+    jsondata = r.json()
+    groups = dict()
+    groupid = commandlineargs.groupid
+
+    if groupid is not None:
+        verbose("Checking for entertainment group {}".format(groupid))
+    else:
+        verbose("Checking for entertainment groups (not none)")
+
+    for k in jsondata:  #These 3 sections isolate Entertainment areas from normal groups (like rooms)
+        if jsondata[k]["type"]=="Entertainment":
+            if groupid is None or k==groupid:
+                groups[k] = jsondata[k]
+
+    if len(groups)==0: #No groups or null = exit
+        if groupid is not None:
+            sys.exit("Entertainment group not found, set one up in the Hue App according to the instructions on github.")
+        else:
+            sys.exit("Entertainment group not found, set one up in the Hue App according to the instructions on github.")
+
+    if len(groups)>1:
+        eprint("Multiple entertainment groups found (", groups,") specify which with --groupid")
+        for g in groups:
+            eprint("{} = {}".format(g,groups[g]["name"]))
+        groupid = input()
+        print("You selected groupid ", groupid)
+        #sys.exit()
+
+    if groupid is None:
+        groupid=next(iter(groups))
+    verbose("Using groupid={}".format(groupid))
+
+    #### Lets get the lights & their locations in our selected group and enable streaming ######
+    for l in jsondata:
+        r = requests.get(url = baseurl+"/{}/groups/{}".format(clientdata['username'],groupid))
+        jsondata = r.json()
+        light_locations = dict()
+        light_locations = jsondata['locations']
+    verbose("These are the lights and locations found: \n", light_locations)
+
+    ##### Setting up streaming service and calling the DTLS handshake command ######
+    verbose("Enabling streaming on your Entertainment area") #Allows us to send UPD to port 2100
+    r = requests.put(url = baseurl+"/{}/groups/{}".format(clientdata['username'],groupid),json={"stream":{"active":True}})
+    jsondata = r.json()
+
+    ######### Prepare the messages' vessel for the RGB values we will insert
+    bufferlock = threading.Lock()
+    stopped = False
+    signal.original_sigint = signal.getsignal(signal.SIGINT)
+    signal.signal(signal.SIGINT, stop)
+    ######################################################
+    ################# Setup Complete #####################
+    ######################################################
+
+    ######### Section executes video input and establishes the connection stream to bridge ##########
+    try:
+        try:
+            threads = list()
+            verbose("Starting cv2input...")
+            t = threading.Thread(target=cv2input_to_buffer)
+            t.start()
+            threads.append(t)
+            time.sleep(.75)
+            verbose("Starting image averager...")
+            t = threading.Thread(target=averageimage)
+            t.start()
+            threads.append(t)
+            time.sleep(.25) #Initialize and find bridge IP before creating connection
+            verbose("Opening SSL stream to lights...")
+            cmd = ["openssl","s_client","-dtls1_2","-cipher","PSK-AES128-GCM-SHA256","-psk_identity",clientdata['username'],"-psk",clientdata['clientkey'], "-connect", hueip+":2100"]
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stdin=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+            t = threading.Thread(target=buffer_to_light, args=(proc,))
+            t.start()
+            threads.append(t)
+
+            # input("Press return to stop") # Allow us to exit easily
+            # stopped=True
+            for t in threads:
+                t.join()
+        except Exception as e:
+            print(e)
+            stopped=True
+
+    finally: #Turn off streaming to allow normal function immedietly
+        verbose("Disabling streaming on Entertainment area")
+        r = requests.put(url = baseurl+"/{}/groups/{}".format(clientdata['username'],groupid),json={"stream":{"active":False}}) 
+        jsondata = r.json()
+        verbose(jsondata)
