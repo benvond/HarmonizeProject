@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<style>
+.button {
+  border: none;
+  color: white;
+  padding: 15px 32px;
+  text-align: center;
+  text-decoration: none;
+  display: inline-block;
+  width: 100%;
+  font-size: 64px;
+  margin: 24px 2px;
+  cursor: pointer;
+}
+
+.button1 {background-color: #4CAF50;} /* Green */
+.button2 {background-color: #ba0000;} /* Red */
+</style>
+</head>
+<body>
+
+{% if running %}
+  <h1>The lights are currently ON</h1>
+{% else %}
+  <h1>The lights are currently OFF</h1>
+{% endif %}
+
+
+<button onclick="location.href='/on'" type="button" class="button button1">ON</button>
+<button onclick="location.href='/off'" type="button" class="button button2">OFF</button>
+
+</body>
+</html>
