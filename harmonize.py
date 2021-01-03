@@ -219,9 +219,12 @@ def buffer_to_light(proc): #Potentially thread this into 2 processes?
 
 
         bufferlock.release()
-        proc.stdin.write(message.decode('utf-8','ignore'))
-        time.sleep(.01) #0.01 to 0.02 (slightly under 100 or 50 messages per sec // or (.015 = ~66.6))
-        proc.stdin.flush()
+        try:
+            proc.stdin.write(message.decode('utf-8','ignore'))
+            time.sleep(.01) #0.01 to 0.02 (slightly under 100 or 50 messages per sec // or (.015 = ~66.6))
+            proc.stdin.flush()
+        except Exception as e:
+            verbose("Broken pipe")
         #verbose('Wrote message and flushed. Briefly waiting') #This will verbose after every send, spamming the console.
 
 def stdin_to_buffer():

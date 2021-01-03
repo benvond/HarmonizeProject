@@ -1,4 +1,5 @@
 from flask import Flask, render_template, redirect
+import os, subprocess, signal
 
 app = Flask(__name__)
 
@@ -8,11 +9,14 @@ def index():
 
 @app.route('/on')
 def on():
+    os.system('sudo python3 harmonize.py -v &')
     app.lights_running = True
     return redirect('/')
 
 @app.route('/off')
 def off():
+    pid = subprocess.check_output('ps aux | grep "python3 harmonize.py -v" | grep -v grep | grep -v sudo | awk \'{print $2}\'', shell=True)
+    os.kill(int(pid.decode('utf-8').rstrip('\n')), signal.SIGINT)
     app.lights_running = False
     return redirect('/')
 
