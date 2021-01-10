@@ -9,14 +9,14 @@ def index():
 
 @app.route('/on')
 def on():
-    if not lights_running:
+    if not app.lights_running:
         os.system('sudo python3 harmonize.py -v &')
     app.lights_running = True
     return redirect('/')
 
 @app.route('/off')
 def off():
-    if lights_running:
+    if app.lights_running:
         pid = subprocess.check_output('ps aux | grep "python3 harmonize.py -v" | grep -v grep | grep -v sudo | awk \'{print $2}\'', shell=True)
         os.kill(int(pid.decode('utf-8').rstrip('\n')), signal.SIGINT)
     app.lights_running = False
