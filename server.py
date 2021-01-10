@@ -16,7 +16,7 @@ def on():
 
 @app.route('/off')
 def off():
-    if lights_running
+    if lights_running:
         pid = subprocess.check_output('ps aux | grep "python3 harmonize.py -v" | grep -v grep | grep -v sudo | awk \'{print $2}\'', shell=True)
         os.kill(int(pid.decode('utf-8').rstrip('\n')), signal.SIGINT)
     app.lights_running = False
