@@ -1,4 +1,4 @@
-from flask import Flask, render_template, redirect
+from flask import Flask, render_template, redirect, jsonify
 import os, subprocess, signal
 
 app = Flask(__name__)
@@ -6,6 +6,10 @@ app = Flask(__name__)
 @app.route('/')
 def index():
     return render_template('index.html', running=app.lights_running)
+
+@app.route('/get_running')
+def get_running():
+    return jsonify(lights_on=app.lights_running)
 
 @app.route('/on')
 def on():
